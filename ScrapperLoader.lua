@@ -1,3 +1,4 @@
+```lua
 --[[
     ScrapperLoader.lua
     ------------------
@@ -40,7 +41,6 @@ local MAX_SOURCE_BYTES = 2 * 1024 * 1024
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
-local UserInputService = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
 if not player then
@@ -62,7 +62,7 @@ local deviceId = "rbx-user-" .. userId
 local hwid = "rbx-user-hwid-" .. userId
 
 ------------------------------------------------------------
--- HTTP
+-- JSON
 ------------------------------------------------------------
 
 local function encodeJSON(value)
@@ -93,6 +93,10 @@ local function decodeJSON(value)
     return nil
 end
 
+------------------------------------------------------------
+-- HEADERS
+------------------------------------------------------------
+
 local function workerHeaders(extra)
     local headers = {
         ["Content-Type"] = "application/json",
@@ -111,64 +115,184 @@ local function workerHeaders(extra)
     return headers
 end
 
+------------------------------------------------------------
+-- HTTP COMPATIBILITY
+------------------------------------------------------------
+
+local function findRequestFunction()
+    local candidates = {
+        rawget(getgenv and getgenv() or _G, "request"),
+        rawget(getgenv and getgenv() or _G, "http_request"),
+        rawget(getgenv and getgenv() or _G, "http"),
+    }
+
+    for _, candidate in ipairs(candidates) do
+        if type(candidate) == "function" then
+            return candidate
+        end
+    end
+
+    if type(request) == "function" then
+        return request
+    end
+
+    if type(http_request) == "function" then
+        return http_request
+    end
+
+    return nil
+end
+
+local function normalizeResponse(response)
+    if type(response) == "string" then
+        return {
+            StatusCode = 200,
+            Body = response,
+        }
+    end
+
+    if type(response) ~= "table" then
+        return nil, "Invalid HTTP response."
+    end
+
+    local statusCode =
+        response.StatusCode
+        or response.Status
+        or response.status_code
+        or response.status
+        or 200
+
+    local body =
+        response.Body
+        or response.body
+        or response.ResponseBody
+        or response.responseBody
+        or ""
+
+    return {
+        StatusCode = tonumber(statusCode) or 200,
+        Body = tostring(body or ""),
+    }
+end
+
+local function requestHTTP(method, url, body, headers)
+    local requestFunction = findRequestFunction()
+
+    --------------------------------------------------------
+    -- Preferred executor request API
+    --------------------------------------------------------
+
+    if requestFunction then
+        local ok, response = pcall(function()
+            return requestFunction({
+                Url = url,
+                Method = method,
+                Headers = headers,
+                Body = body,
+            })
+        end)
+
+        if ok then
+            local normalized, normalizeError = normalizeResponse(response)
+
+            if normalized then
+                return normalized
+            end
+
+            return nil, normalizeError
+        end
+    end
+
+    --------------------------------------------------------
+    -- Roblox HTTP fallback
+    --
+    -- These methods cannot reliably provide arbitrary custom
+    -- request headers on all executors, so they are only used
+    -- when the executor request API is unavailable.
+    --------------------------------------------------------
+
+    if method == "POST" then
+        local ok, result = pcall(function()
+            return game:HttpPost(
+                url,
+                body,
+                Enum.HttpContentType.ApplicationJson
+            )
+        end)
+
+        if ok and type(result) == "string" then
+            return {
+                StatusCode = 200,
+                Body = result,
+            }
+        end
+
+        return nil, "POST request failed: " .. tostring(result)
+    end
+
+    if method == "GET" then
+        local ok, result = pcall(function()
+            return game:HttpGet(url)
+        end)
+
+        if ok and type(result) == "string" then
+            return {
+                StatusCode = 200,
+                Body = result,
+            }
+        end
+
+        return nil, "GET request failed: " .. tostring(result)
+    end
+
+    return nil, "Unsupported HTTP method: " .. tostring(method)
+end
+
+------------------------------------------------------------
+-- WORKER REQUESTS
+------------------------------------------------------------
+
 local function postWorker(path, payload, extraHeaders)
     local body = encodeJSON(payload or {})
     local headers = workerHeaders(extraHeaders)
 
-    local ok, result = pcall(function()
-        return game:HttpPost(
-            WORKER_URL .. path,
-            body,
-            "application/json",
-            headers
-        )
-    end)
+    local response, err = requestHTTP(
+        "POST",
+        WORKER_URL .. path,
+        body,
+        headers
+    )
 
-    if not ok then
-        return nil, "Worker request failed: " .. tostring(result)
+    if not response then
+        return nil, "Worker request failed: " .. tostring(err)
     end
 
-    local data = decodeJSON(result)
+    local data = decodeJSON(response.Body)
 
     if not data then
-        return nil, "Worker returned invalid JSON."
+        return nil,
+            "Worker returned invalid JSON (HTTP " ..
+            tostring(response.StatusCode) ..
+            ")."
+    end
+
+    --------------------------------------------------------
+    -- IMPORTANT:
+    -- The Worker uses 401 for normal authorization states
+    -- such as LICENSE_REQUIRED. That is NOT an outdated
+    -- loader response.
+    --------------------------------------------------------
+
+    if data.error then
+        return data, tostring(data.error)
+    end
+
+    if response.StatusCode >= 400 then
+        return data,
+            "HTTP " .. tostring(response.StatusCode)
     end
 
     return data
-end
-
-local function explainAuthError(err)
-    local value = tostring(err or "")
-
-    if value == "CLIENT_UPDATE_REQUIRED" then
-        return "This loader is outdated. Update the public loader before continuing."
-    elseif value == "LICENSE_REQUIRED" then
-        return "A new PWF license key is required."
-    elseif value == "DEVICE_NOT_ENROLLED" then
-        return "This Roblox account/device is not enrolled. Enter a new PWF license key."
-    elseif value == "DEVICE_ENTITLEMENT_EXPIRED" then
-        return "The 24-hour activation has expired. Enter a new PWF license key."
-    elseif value == "HWID_MISMATCH" then
-        return "This PWF license is already bound to a different device identity."
-    elseif value == "DEVICE_LIMIT" then
-        return "The PWF device limit has been reached."
-    elseif value == "INVALID_LICENSE" then
-        return "The PWF license key is invalid."
-    elseif value == "LICENSE_EXPIRED" then
-        return "The PWF license has expired."
-    elseif value == "LICENSE_BANNED" then
-        return "The PWF license is banned."
-    elseif value == "LICENSE_PAUSED" then
-        return "The PWF license is paused."
-    elseif value == "USER_MISMATCH" then
-        return "This activation is bound to a different Roblox account."
-    elseif value == "JOB_MISMATCH" then
-        return "The authorization belongs to a different Roblox server session. Please retry."
-    elseif string.find(value, "HTTP 426", 1, true) then
-        return "The Worker rejected this loader because it requires a newer client version."
-    end
-
-    return value ~= "" and value or "Authorization failed."
 end
 
 local function getSource(token)
@@ -176,20 +300,36 @@ local function getSource(token)
         return nil, "Missing source token."
     end
 
-    local ok, result = pcall(function()
-        return game:HttpGet(
-            WORKER_URL .. "/script",
-            true,
-            workerHeaders({
-                ["Authorization"] = "Bearer " .. token,
-            })
-        )
-    end)
+    local headers = workerHeaders({
+        ["Authorization"] = "Bearer " .. token,
+    })
 
-    if not ok then
-        -- Delta builds that do not accept the header form above cannot
-        -- retrieve the protected /script endpoint safely.
-        return nil, "Private source request failed: " .. tostring(result)
+    local response, err = requestHTTP(
+        "GET",
+        WORKER_URL .. "/script",
+        nil,
+        headers
+    )
+
+    if not response then
+        return nil,
+            "Private source request failed: " ..
+            tostring(err)
+    end
+
+    local result = response.Body
+
+    if response.StatusCode >= 400 then
+        local errorData = decodeJSON(result)
+
+        if errorData and errorData.error then
+            return nil, tostring(errorData.error)
+        end
+
+        return nil,
+            "Private source request failed (HTTP " ..
+            tostring(response.StatusCode) ..
+            ")."
     end
 
     if type(result) ~= "string" or result == "" then
@@ -204,10 +344,61 @@ local function getSource(token)
 end
 
 ------------------------------------------------------------
+-- AUTH ERROR MESSAGES
+------------------------------------------------------------
+
+local function explainAuthError(err)
+    local value = tostring(err or "")
+
+    if value == "CLIENT_UPDATE_REQUIRED" then
+        return "This loader is outdated. Update the public loader before continuing."
+
+    elseif value == "LICENSE_REQUIRED" then
+        return "A new PWF license key is required."
+
+    elseif value == "DEVICE_NOT_ENROLLED" then
+        return "This Roblox account/device is not enrolled. Enter a new PWF license key."
+
+    elseif value == "DEVICE_ENTITLEMENT_EXPIRED" then
+        return "The 24-hour activation has expired. Enter a new PWF license key."
+
+    elseif value == "HWID_MISMATCH" then
+        return "This PWF license is already bound to a different device identity."
+
+    elseif value == "DEVICE_LIMIT" then
+        return "The PWF device limit has been reached."
+
+    elseif value == "INVALID_LICENSE" then
+        return "The PWF license key is invalid."
+
+    elseif value == "LICENSE_EXPIRED" then
+        return "The PWF license has expired."
+
+    elseif value == "LICENSE_BANNED" then
+        return "The PWF license is banned."
+
+    elseif value == "LICENSE_PAUSED" then
+        return "The PWF license is paused."
+
+    elseif value == "USER_MISMATCH" then
+        return "This activation is bound to a different Roblox account."
+
+    elseif value == "JOB_MISMATCH" then
+        return "The authorization belongs to a different Roblox server session. Please retry."
+
+    elseif string.find(value, "HTTP 426", 1, true) then
+        return "The Worker rejected this loader because it requires a newer client version."
+    end
+
+    return value ~= "" and value or "Authorization failed."
+end
+
+------------------------------------------------------------
 -- UI
 ------------------------------------------------------------
 
 local existing = playerGui:FindFirstChild("ScrapperLoader")
+
 if existing then
     existing:Destroy()
 end
@@ -264,6 +455,7 @@ panel.BackgroundColor3 = THEME.panel2
 panel.BorderSizePixel = 0
 panel.ZIndex = 101
 panel.Parent = overlay
+
 round(panel, 10)
 addStroke(panel, THEME.stroke, 0, 1)
 
@@ -321,6 +513,7 @@ input.Font = Enum.Font.Gotham
 input.TextXAlignment = Enum.TextXAlignment.Left
 input.ZIndex = 102
 input.Parent = panel
+
 round(input, 6)
 
 local padding = Instance.new("UIPadding")
@@ -353,6 +546,7 @@ activate.Font = Enum.Font.GothamSemibold
 activate.AutoButtonColor = true
 activate.ZIndex = 102
 activate.Parent = panel
+
 round(activate, 6)
 
 local close = Instance.new("TextButton")
@@ -368,6 +562,7 @@ close.Font = Enum.Font.GothamMedium
 close.AutoButtonColor = true
 close.ZIndex = 102
 close.Parent = panel
+
 round(close, 6)
 
 local busy = false
@@ -404,6 +599,7 @@ local function executeSource(source)
     end
 
     local compiler = loadstring
+
     if type(compiler) ~= "function" then
         return false, "loadstring is unavailable in this executor."
     end
@@ -413,13 +609,17 @@ local function executeSource(source)
     end)
 
     if not ok or type(chunkOrError) ~= "function" then
-        return false, "Inspector source compilation failed: " .. tostring(chunkOrError)
+        return false,
+            "Inspector source compilation failed: " ..
+            tostring(chunkOrError)
     end
 
     local runOk, runError = pcall(chunkOrError)
 
     if not runOk then
-        return false, "Inspector source execution failed: " .. tostring(runError)
+        return false,
+            "Inspector source execution failed: " ..
+            tostring(runError)
     end
 
     return true
@@ -478,30 +678,47 @@ local function activateWithLicense()
 
     if not data then
         setStatus(err or "Worker request failed.", "error")
+
         busy = false
         activate.AutoButtonColor = true
         activate.Text = "Activate"
+
         return
     end
 
     if type(data.token) ~= "string" or data.token == "" then
-        local message = explainAuthError(data.error or "License activation failed.")
+        local message = explainAuthError(
+            data.error or
+            err or
+            "License activation failed."
+        )
+
         setStatus(message, "error")
+
         busy = false
         activate.AutoButtonColor = true
         activate.Text = "Activate"
+
         return
     end
 
-    setStatus("Activation successful. Loading Inspector...", "success")
+    setStatus(
+        "Activation successful. Loading Inspector...",
+        "success"
+    )
 
     local source, sourceError = getSource(data.token)
 
     if not source then
-        setStatus(sourceError or "Could not retrieve Inspector.", "error")
+        setStatus(
+            explainAuthError(sourceError or "Could not retrieve Inspector."),
+            "error"
+        )
+
         busy = false
         activate.AutoButtonColor = true
         activate.Text = "Activate"
+
         return
     end
 
@@ -530,12 +747,22 @@ task.spawn(function()
     local token, err = fetchWithCurrentActivation()
 
     if token then
-        setStatus("Activation found. Loading Inspector...", "success")
+        setStatus(
+            "Activation found. Loading Inspector...",
+            "success"
+        )
 
         local source, sourceError = getSource(token)
 
         if not source then
-            setStatus(sourceError or "Could not retrieve Inspector.", "error")
+            setStatus(
+                explainAuthError(
+                    sourceError or
+                    "Could not retrieve Inspector."
+                ),
+                "error"
+            )
+
             return
         end
 
@@ -550,6 +777,11 @@ task.spawn(function()
         return
     end
 
+    --------------------------------------------------------
+    -- These are normal states where the license panel
+    -- should be displayed.
+    --------------------------------------------------------
+
     if err == "LICENSE_REQUIRED"
         or err == "DEVICE_NOT_ENROLLED"
         or err == "DEVICE_ENTITLEMENT_EXPIRED" then
@@ -559,18 +791,37 @@ task.spawn(function()
             "Enter a new PWF license key to continue."
 
         setStatus("License required.", nil)
-        input:CaptureFocus()
+
+        task.defer(function()
+            input:CaptureFocus()
+        end)
+
         return
     end
+
+    --------------------------------------------------------
+    -- This is the ONLY normal response that should display
+    -- the outdated-loader message.
+    --------------------------------------------------------
 
     if err == "CLIENT_UPDATE_REQUIRED" then
         subtitle.Text =
             "This loader version is not accepted by the Worker.\n" ..
             "Update the public loader and try again."
-        setStatus(explainAuthError(err), "error")
+
+        setStatus(
+            explainAuthError(err),
+            "error"
+        )
+
         return
     end
 
     subtitle.Text = "Authorization check failed."
-    setStatus(explainAuthError(err), "error")
+
+    setStatus(
+        explainAuthError(err),
+        "error"
+    )
 end)
+```
