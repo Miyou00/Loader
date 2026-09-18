@@ -31,7 +31,7 @@
 ------------------------------------------------------------
 
 local WORKER_URL = "https://private-inspector.psychepsycho851.workers.dev"
-local SCRIPT_VERSION = "2.7.0"
+local SCRIPT_VERSION = "2.7.1"
 local MAX_SOURCE_BYTES = 2 * 1024 * 1024
 
 ------------------------------------------------------------
