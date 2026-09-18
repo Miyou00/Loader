@@ -1,16 +1,31 @@
-```lua
 --[[
     ScrapperLoader.lua
-    Private Inspector public bootstrap loader
+    ------------------
+    Public bootstrap loader for the Private Inspector.
 
     Worker:
-    https://private-inspector.psychepsycho851.workers.dev
+        https://private-inspector.psychepsycho851.workers.dev
 
     Client version:
-    2.7.0
+        2.7.0
 
-    The loader intentionally creates its UI BEFORE performing
-    any HTTP/authentication work so failures remain visible.
+    Flow:
+        1. Identify the Roblox account.
+        2. Ask the Worker for an authorization token.
+        3. If an active 24-hour activation exists, receive a
+           fresh source token.
+        4. Otherwise show the license panel.
+        5. Submit the PWF license key.
+        6. Receive a fresh source token.
+        7. Request the private Inspector source.
+        8. Execute the returned source.
+
+    IMPORTANT:
+        Delta's request() API is used because it was verified
+        working against the Worker.
+
+        X-HWID is an account-bound identifier, not a genuine
+        hardware fingerprint.
 ]]
 
 ------------------------------------------------------------
@@ -43,10 +58,47 @@ local playerGui = player:WaitForChild("PlayerGui")
 local userId = tostring(player.UserId)
 local jobId = tostring(game.JobId or "")
 
--- These are account-bound identifiers.
--- They are NOT genuine hardware fingerprints.
 local deviceId = "rbx-user-" .. userId
 local hwid = "rbx-user-hwid-" .. userId
+
+------------------------------------------------------------
+-- REQUEST API
+------------------------------------------------------------
+
+local requestFunction
+
+do
+    local found = false
+
+    local ok, value = pcall(function()
+        return request
+    end)
+
+    if ok and type(value) == "function" then
+        requestFunction = value
+        found = true
+    end
+
+    if not found then
+        local genvOk, genv = pcall(function()
+            if type(getgenv) == "function" then
+                return getgenv()
+            end
+
+            return nil
+        end)
+
+        if genvOk and type(genv) == "table" then
+            local requestOk, requestValue = pcall(function()
+                return genv.request
+            end)
+
+            if requestOk and type(requestValue) == "function" then
+                requestFunction = requestValue
+            end
+        end
+    end
+end
 
 ------------------------------------------------------------
 -- UI
@@ -58,26 +110,28 @@ if oldGui then
     oldGui:Destroy()
 end
 
-local gui = Instance.new("ScreenGui")
-gui.Name = "ScrapperLoader"
-gui.ResetOnSpawn = false
-gui.IgnoreGuiInset = true
-gui.DisplayOrder = 999999
-gui.Parent = playerGui
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "ScrapperLoader"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.DisplayOrder = 999999
+screenGui.Parent = playerGui
 
-local background = Instance.new("Frame")
-background.Size = UDim2.fromScale(1, 1)
-background.BackgroundColor3 = Color3.fromRGB(15, 17, 21)
-background.BorderSizePixel = 0
-background.Parent = gui
+local overlay = Instance.new("Frame")
+overlay.Name = "Overlay"
+overlay.Size = UDim2.fromScale(1, 1)
+overlay.BackgroundColor3 = Color3.fromRGB(15, 17, 21)
+overlay.BorderSizePixel = 0
+overlay.Parent = screenGui
 
 local panel = Instance.new("Frame")
+panel.Name = "Panel"
 panel.Size = UDim2.fromOffset(440, 285)
 panel.Position = UDim2.fromScale(0.5, 0.5)
 panel.AnchorPoint = Vector2.new(0.5, 0.5)
 panel.BackgroundColor3 = Color3.fromRGB(24, 27, 33)
 panel.BorderSizePixel = 0
-panel.Parent = background
+panel.Parent = overlay
 
 local panelCorner = Instance.new("UICorner")
 panelCorner.CornerRadius = UDim.new(0, 10)
@@ -87,6 +141,10 @@ local panelStroke = Instance.new("UIStroke")
 panelStroke.Color = Color3.fromRGB(55, 62, 74)
 panelStroke.Thickness = 1
 panelStroke.Parent = panel
+
+------------------------------------------------------------
+-- TITLE
+------------------------------------------------------------
 
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -40, 0, 32)
@@ -99,11 +157,15 @@ title.Font = Enum.Font.GothamBold
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Parent = panel
 
+------------------------------------------------------------
+-- SUBTITLE
+------------------------------------------------------------
+
 local subtitle = Instance.new("TextLabel")
-subtitle.Size = UDim2.new(1, -40, 0, 42)
+subtitle.Size = UDim2.new(1, -40, 0, 44)
 subtitle.Position = UDim2.fromOffset(20, 56)
 subtitle.BackgroundTransparency = 1
-subtitle.Text = "Starting..."
+subtitle.Text = "Checking your activation..."
 subtitle.TextColor3 = Color3.fromRGB(151, 160, 174)
 subtitle.TextSize = 12
 subtitle.Font = Enum.Font.Gotham
@@ -112,9 +174,13 @@ subtitle.TextXAlignment = Enum.TextXAlignment.Left
 subtitle.TextYAlignment = Enum.TextYAlignment.Top
 subtitle.Parent = panel
 
+------------------------------------------------------------
+-- USER ID
+------------------------------------------------------------
+
 local userLabel = Instance.new("TextLabel")
 userLabel.Size = UDim2.new(1, -40, 0, 20)
-userLabel.Position = UDim2.fromOffset(20, 96)
+userLabel.Position = UDim2.fromOffset(20, 98)
 userLabel.BackgroundTransparency = 1
 userLabel.Text = "Roblox UserId: " .. userId
 userLabel.TextColor3 = Color3.fromRGB(151, 160, 174)
@@ -123,9 +189,14 @@ userLabel.Font = Enum.Font.Gotham
 userLabel.TextXAlignment = Enum.TextXAlignment.Left
 userLabel.Parent = panel
 
+------------------------------------------------------------
+-- LICENSE INPUT
+------------------------------------------------------------
+
 local input = Instance.new("TextBox")
+input.Name = "LicenseKey"
 input.Size = UDim2.new(1, -40, 0, 42)
-input.Position = UDim2.fromOffset(20, 126)
+input.Position = UDim2.fromOffset(20, 128)
 input.BackgroundColor3 = Color3.fromRGB(29, 33, 40)
 input.BorderSizePixel = 0
 input.Text = ""
@@ -147,9 +218,13 @@ inputPadding.PaddingLeft = UDim.new(0, 12)
 inputPadding.PaddingRight = UDim.new(0, 12)
 inputPadding.Parent = input
 
+------------------------------------------------------------
+-- STATUS
+------------------------------------------------------------
+
 local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, -40, 0, 42)
-status.Position = UDim2.fromOffset(20, 176)
+status.Size = UDim2.new(1, -40, 0, 44)
+status.Position = UDim2.fromOffset(20, 178)
 status.BackgroundTransparency = 1
 status.Text = "Initializing..."
 status.TextColor3 = Color3.fromRGB(151, 160, 174)
@@ -160,38 +235,48 @@ status.TextXAlignment = Enum.TextXAlignment.Left
 status.TextYAlignment = Enum.TextYAlignment.Top
 status.Parent = panel
 
-local close = Instance.new("TextButton")
-close.Size = UDim2.fromOffset(80, 38)
-close.Position = UDim2.new(0, 20, 1, -54)
-close.BackgroundColor3 = Color3.fromRGB(29, 33, 40)
-close.BorderSizePixel = 0
-close.Text = "Close"
-close.TextColor3 = Color3.fromRGB(240, 243, 247)
-close.TextSize = 12
-close.Font = Enum.Font.GothamMedium
-close.Parent = panel
+------------------------------------------------------------
+-- CLOSE BUTTON
+------------------------------------------------------------
+
+local closeButton = Instance.new("TextButton")
+closeButton.Name = "Close"
+closeButton.Size = UDim2.fromOffset(80, 38)
+closeButton.Position = UDim2.new(0, 20, 1, -54)
+closeButton.BackgroundColor3 = Color3.fromRGB(29, 33, 40)
+closeButton.BorderSizePixel = 0
+closeButton.Text = "Close"
+closeButton.TextColor3 = Color3.fromRGB(240, 243, 247)
+closeButton.TextSize = 12
+closeButton.Font = Enum.Font.GothamMedium
+closeButton.Parent = panel
 
 local closeCorner = Instance.new("UICorner")
 closeCorner.CornerRadius = UDim.new(0, 6)
-closeCorner.Parent = close
+closeCorner.Parent = closeButton
 
-local activate = Instance.new("TextButton")
-activate.Size = UDim2.fromOffset(120, 38)
-activate.Position = UDim2.new(1, -140, 1, -54)
-activate.BackgroundColor3 = Color3.fromRGB(92, 151, 255)
-activate.BorderSizePixel = 0
-activate.Text = "Activate"
-activate.TextColor3 = Color3.fromRGB(255, 255, 255)
-activate.TextSize = 12
-activate.Font = Enum.Font.GothamSemibold
-activate.Parent = panel
+------------------------------------------------------------
+-- ACTIVATE BUTTON
+------------------------------------------------------------
+
+local activateButton = Instance.new("TextButton")
+activateButton.Name = "Activate"
+activateButton.Size = UDim2.fromOffset(120, 38)
+activateButton.Position = UDim2.new(1, -140, 1, -54)
+activateButton.BackgroundColor3 = Color3.fromRGB(92, 151, 255)
+activateButton.BorderSizePixel = 0
+activateButton.Text = "Activate"
+activateButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+activateButton.TextSize = 12
+activateButton.Font = Enum.Font.GothamSemibold
+activateButton.Parent = panel
 
 local activateCorner = Instance.new("UICorner")
 activateCorner.CornerRadius = UDim.new(0, 6)
-activateCorner.Parent = activate
+activateCorner.Parent = activateButton
 
 ------------------------------------------------------------
--- UI HELPERS
+-- UI FUNCTIONS
 ------------------------------------------------------------
 
 local function setStatus(message, kind)
@@ -210,14 +295,14 @@ local function setSubtitle(message)
     subtitle.Text = tostring(message or "")
 end
 
-local function destroyUI()
-    if gui and gui.Parent then
-        gui:Destroy()
+local function destroyLoader()
+    if screenGui and screenGui.Parent then
+        screenGui:Destroy()
     end
 end
 
-close.Activated:Connect(function()
-    destroyUI()
+closeButton.Activated:Connect(function()
+    destroyLoader()
 end)
 
 ------------------------------------------------------------
@@ -229,7 +314,7 @@ local function encodeJSON(value)
         return HttpService:JSONEncode(value)
     end)
 
-    if ok then
+    if ok and type(result) == "string" then
         return result
     end
 
@@ -256,7 +341,7 @@ end
 -- HEADERS
 ------------------------------------------------------------
 
-local function makeHeaders(extra)
+local function buildHeaders(extra)
     local headers = {
         ["Content-Type"] = "application/json",
         ["Cache-Control"] = "no-cache",
@@ -275,178 +360,113 @@ local function makeHeaders(extra)
 end
 
 ------------------------------------------------------------
--- EXECUTOR REQUEST DETECTION
-------------------------------------------------------------
-
-local function getRequestFunction()
-    local names = {
-        "request",
-        "http_request",
-        "syn_request"
-    }
-
-    for _, name in ipairs(names) do
-        local fn = nil
-
-        local ok = pcall(function()
-            fn = _G[name]
-        end)
-
-        if ok and type(fn) == "function" then
-            return fn, name
-        end
-
-        local genvOk, genv = pcall(function()
-            if type(getgenv) == "function" then
-                return getgenv()
-            end
-
-            return nil
-        end)
-
-        if genvOk and type(genv) == "table" then
-            local valueOk, value = pcall(function()
-                return genv[name]
-            end)
-
-            if valueOk and type(value) == "function" then
-                return value, name
-            end
-        end
-    end
-
-    return nil, nil
-end
-
-------------------------------------------------------------
 -- HTTP REQUEST
 ------------------------------------------------------------
 
-local function requestHTTP(method, path, body, extraHeaders)
-    local url = WORKER_URL .. path
-    local headers = makeHeaders(extraHeaders)
-
-    --------------------------------------------------------
-    -- Try executor request API
-    --------------------------------------------------------
-
-    local requestFunction, requestName = getRequestFunction()
-
-    if requestFunction then
-        local requestData = {
-            Url = url,
-            Method = method,
-            Headers = headers
-        }
-
-        if body ~= nil then
-            requestData.Body = body
-        end
-
-        local ok, response = pcall(function()
-            return requestFunction(requestData)
-        end)
-
-        if ok and type(response) == "table" then
-            local responseBody =
-                response.Body
-                or response.body
-                or response.ResponseBody
-                or response.responseBody
-
-            local responseStatus =
-                response.StatusCode
-                or response.Status
-                or response.statusCode
-                or response.status
-
-            if type(responseBody) == "string" then
-                return true, responseBody, tonumber(responseStatus) or 200, requestName
-            end
-        end
+local function httpRequest(method, path, body, extraHeaders)
+    if type(requestFunction) ~= "function" then
+        return nil, nil,
+            "Delta request() is unavailable."
     end
 
-    --------------------------------------------------------
-    -- Fallback: game:HttpPost / game:HttpGet
-    --------------------------------------------------------
+    local requestData = {
+        Url = WORKER_URL .. path,
+        Method = method,
+        Headers = buildHeaders(extraHeaders)
+    }
 
-    if method == "POST" then
-        local ok, response = pcall(function()
-            return game:HttpPost(
-                url,
-                body or "",
-                "application/json",
-                headers
-            )
-        end)
-
-        if ok and type(response) == "string" then
-            return true, response, 200, "game:HttpPost"
-        end
-
-        return false, tostring(response), 0, "game:HttpPost"
+    if body ~= nil then
+        requestData.Body = body
     end
 
     local ok, response = pcall(function()
-        return game:HttpGet(
-            url,
-            true,
-            headers
-        )
+        return requestFunction(requestData)
     end)
 
-    if ok and type(response) == "string" then
-        return true, response, 200, "game:HttpGet"
+    if not ok then
+        return nil, nil,
+            "Delta request() failed:\n" .. tostring(response)
     end
 
-    return false, tostring(response), 0, "game:HttpGet"
+    if type(response) ~= "table" then
+        return nil, nil,
+            "Delta request() returned an invalid response."
+    end
+
+    local responseBody =
+        response.Body
+        or response.body
+        or response.ResponseBody
+        or response.responseBody
+
+    local statusCode =
+        response.StatusCode
+        or response.Status
+        or response.statusCode
+        or response.status
+
+    if type(responseBody) ~= "string" then
+        responseBody = tostring(responseBody or "")
+    end
+
+    return responseBody, tonumber(statusCode) or 0, nil
 end
 
 ------------------------------------------------------------
--- /token
+-- TOKEN REQUEST
 ------------------------------------------------------------
 
-local function requestToken(licenseKey)
+local function getToken(licenseKey)
     local payload = {
         user_id = userId,
         job_id = jobId
     }
 
-    if licenseKey and licenseKey ~= "" then
+    if type(licenseKey) == "string" and licenseKey ~= "" then
         payload.license_key = licenseKey
     end
 
     local body = encodeJSON(payload)
 
-    local ok, responseBody, statusCode, method =
-        requestHTTP("POST", "/token", body)
+    local responseBody, statusCode, requestError =
+        httpRequest(
+            "POST",
+            "/token",
+            body
+        )
 
-    if not ok then
-        return nil, "HTTP request failed (" .. tostring(method) .. "): " .. tostring(responseBody)
+    if requestError then
+        return nil, requestError
+    end
+
+    if type(responseBody) ~= "string" or responseBody == "" then
+        return nil,
+            "Worker returned an empty response.\nHTTP " ..
+            tostring(statusCode)
     end
 
     local data = decodeJSON(responseBody)
 
     if not data then
         return nil,
-            "Worker returned invalid JSON. HTTP " ..
+            "Worker returned invalid JSON.\nHTTP " ..
             tostring(statusCode) ..
-            "\nResponse: " ..
-            string.sub(tostring(responseBody), 1, 300)
+            "\n\n" ..
+            string.sub(responseBody, 1, 400)
     end
 
     if type(data.token) == "string" and data.token ~= "" then
         return data.token, nil
     end
 
-    return nil, data.error or "AUTHORIZATION_FAILED"
+    return nil, tostring(data.error or "AUTHORIZATION_FAILED")
 end
 
 ------------------------------------------------------------
--- ERROR MESSAGES
+-- AUTH ERROR TRANSLATION
 ------------------------------------------------------------
 
-local function explainError(errorCode)
+local function explainAuthError(errorCode)
     local value = tostring(errorCode or "")
 
     if value == "CLIENT_UPDATE_REQUIRED" then
@@ -454,11 +474,11 @@ local function explainError(errorCode)
     end
 
     if value == "LICENSE_REQUIRED" then
-        return "No active activation. Enter a PWF license key."
+        return "No active 24-hour activation was found."
     end
 
     if value == "DEVICE_NOT_ENROLLED" then
-        return "This account is not enrolled. Enter a PWF license key."
+        return "This Roblox account is not enrolled."
     end
 
     if value == "DEVICE_ENTITLEMENT_EXPIRED" then
@@ -501,7 +521,7 @@ local function explainError(errorCode)
 end
 
 ------------------------------------------------------------
--- /script
+-- PRIVATE SOURCE
 ------------------------------------------------------------
 
 local function getSource(token)
@@ -509,8 +529,8 @@ local function getSource(token)
         return nil, "Missing source token."
     end
 
-    local ok, responseBody, statusCode, method =
-        requestHTTP(
+    local responseBody, statusCode, requestError =
+        httpRequest(
             "GET",
             "/script",
             nil,
@@ -519,6 +539,400 @@ local function getSource(token)
             }
         )
 
-    if not ok then
+    if requestError then
+        return nil, requestError
+    end
+
+    if type(responseBody) ~= "string" or responseBody == "" then
         return nil,
-```
+            "Private Inspector source was empty.\nHTTP " ..
+            tostring(statusCode)
+    end
+
+    if #responseBody > MAX_SOURCE_BYTES then
+        return nil, "Private Inspector source exceeded the size limit."
+    end
+
+    --------------------------------------------------------
+    -- Worker JSON error response
+    --------------------------------------------------------
+
+    local firstCharacter = string.sub(
+        responseBody:gsub("^%s+", ""),
+        1,
+        1
+    )
+
+    if firstCharacter == "{" then
+        local errorData = decodeJSON(responseBody)
+
+        if errorData then
+            local errorMessage =
+                errorData.error
+                or errorData.message
+                or "Private source request failed."
+
+            return nil,
+                tostring(errorMessage) ..
+                "\nHTTP " ..
+                tostring(statusCode)
+        end
+    end
+
+    return responseBody, nil
+end
+
+------------------------------------------------------------
+-- SOURCE EXECUTION
+------------------------------------------------------------
+
+local function executeSource(source)
+    if type(source) ~= "string" or source == "" then
+        return false, "Private Inspector source is empty."
+    end
+
+    if type(loadstring) ~= "function" then
+        return false,
+            "loadstring is unavailable in this executor."
+    end
+
+    local compileOk, chunkOrError = pcall(function()
+        return loadstring(source)
+    end)
+
+    if not compileOk then
+        return false,
+            "Inspector compilation failed:\n" ..
+            tostring(chunkOrError)
+    end
+
+    if type(chunkOrError) ~= "function" then
+        return false,
+            "Inspector compilation did not return a function."
+    end
+
+    local executeOk, executeError =
+        pcall(chunkOrError)
+
+    if not executeOk then
+        return false,
+            "Inspector execution failed:\n" ..
+            tostring(executeError)
+    end
+
+    return true
+end
+
+------------------------------------------------------------
+-- EXECUTION ERROR UI
+------------------------------------------------------------
+
+local function showFatalError(message)
+    destroyLoader()
+
+    local errorGui = Instance.new("ScreenGui")
+    errorGui.Name = "ScrapperLoaderError"
+    errorGui.ResetOnSpawn = false
+    errorGui.IgnoreGuiInset = true
+    errorGui.DisplayOrder = 999999
+    errorGui.Parent = playerGui
+
+    local errorFrame = Instance.new("Frame")
+    errorFrame.Size = UDim2.fromScale(1, 1)
+    errorFrame.BackgroundColor3 = Color3.fromRGB(15, 17, 21)
+    errorFrame.BorderSizePixel = 0
+    errorFrame.Parent = errorGui
+
+    local errorPanel = Instance.new("Frame")
+    errorPanel.Size = UDim2.fromOffset(520, 230)
+    errorPanel.Position = UDim2.fromScale(0.5, 0.5)
+    errorPanel.AnchorPoint = Vector2.new(0.5, 0.5)
+    errorPanel.BackgroundColor3 = Color3.fromRGB(24, 27, 33)
+    errorPanel.BorderSizePixel = 0
+    errorPanel.Parent = errorFrame
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = errorPanel
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(90, 55, 55)
+    stroke.Thickness = 1
+    stroke.Parent = errorPanel
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -40, 1, -40)
+    label.Position = UDim2.fromOffset(20, 20)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = Color3.fromRGB(245, 100, 100)
+    label.TextSize = 14
+    label.Font = Enum.Font.Gotham
+    label.TextWrapped = true
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextYAlignment = Enum.TextYAlignment.Top
+    label.Text =
+        "PRIVATE INSPECTOR ERROR\n\n" ..
+        tostring(message)
+    label.Parent = errorPanel
+end
+
+------------------------------------------------------------
+-- LICENSE ACTIVATION
+------------------------------------------------------------
+
+local busy = false
+
+local function activateLicense()
+    if busy then
+        return
+    end
+
+    local licenseKey =
+        tostring(input.Text or ""):match("^%s*(.-)%s*$")
+        or ""
+
+    if licenseKey == "" then
+        setStatus(
+            "Enter a PWF license key.",
+            "error"
+        )
+        return
+    end
+
+    if #licenseKey > 128 then
+        setStatus(
+            "License key is too long.",
+            "error"
+        )
+        return
+    end
+
+    busy = true
+
+    activateButton.Text = "Checking..."
+    activateButton.AutoButtonColor = false
+
+    setSubtitle(
+        "Submitting your PWF license key..."
+    )
+
+    setStatus(
+        "Activating license...",
+        nil
+    )
+
+    local token, tokenError =
+        getToken(licenseKey)
+
+    if not token then
+        setStatus(
+            explainAuthError(tokenError),
+            "error"
+        )
+
+        busy = false
+        activateButton.Text = "Activate"
+        activateButton.AutoButtonColor = true
+
+        return
+    end
+
+    setSubtitle(
+        "Activation successful.\n" ..
+        "Retrieving Private Inspector..."
+    )
+
+    setStatus(
+        "Fetching private source...",
+        "success"
+    )
+
+    local source, sourceError =
+        getSource(token)
+
+    if not source then
+        setStatus(
+            sourceError,
+            "error"
+        )
+
+        busy = false
+        activateButton.Text = "Activate"
+        activateButton.AutoButtonColor = true
+
+        return
+    end
+
+    setStatus(
+        "Starting Private Inspector...",
+        "success"
+    )
+
+    task.wait(0.2)
+
+    destroyLoader()
+
+    local executed, executionError =
+        executeSource(source)
+
+    if not executed then
+        showFatalError(executionError)
+    end
+end
+
+activateButton.Activated:Connect(
+    activateLicense
+)
+
+input.FocusLost:Connect(
+    function(enterPressed)
+        if enterPressed then
+            activateLicense()
+        end
+    end
+)
+
+------------------------------------------------------------
+-- STARTUP
+------------------------------------------------------------
+
+task.spawn(function()
+
+    --------------------------------------------------------
+    -- Verify request API
+    --------------------------------------------------------
+
+    if type(requestFunction) ~= "function" then
+        setSubtitle(
+            "Delta HTTP API could not be detected."
+        )
+
+        setStatus(
+            "request() is unavailable.",
+            "error"
+        )
+
+        return
+    end
+
+    --------------------------------------------------------
+    -- Existing activation
+    --------------------------------------------------------
+
+    setSubtitle(
+        "Checking your existing activation..."
+    )
+
+    setStatus(
+        "Connecting to authorization server...",
+        nil
+    )
+
+    local token, tokenError =
+        getToken()
+
+    --------------------------------------------------------
+    -- Existing activation found
+    --------------------------------------------------------
+
+    if token then
+
+        setSubtitle(
+            "Active 24-hour activation found."
+        )
+
+        setStatus(
+            "Retrieving Private Inspector...",
+            "success"
+        )
+
+        local source, sourceError =
+            getSource(token)
+
+        if not source then
+            setStatus(
+                sourceError,
+                "error"
+            )
+            return
+        end
+
+        setStatus(
+            "Starting Private Inspector...",
+            "success"
+        )
+
+        task.wait(0.2)
+
+        destroyLoader()
+
+        local executed, executionError =
+            executeSource(source)
+
+        if not executed then
+            showFatalError(executionError)
+        end
+
+        return
+    end
+
+    --------------------------------------------------------
+    -- License required
+    --------------------------------------------------------
+
+    if tokenError == "LICENSE_REQUIRED"
+        or tokenError == "DEVICE_NOT_ENROLLED"
+        or tokenError == "DEVICE_ENTITLEMENT_EXPIRED" then
+
+        setSubtitle(
+            "No active 24-hour activation was found.\n" ..
+            "Enter a new PWF license key to continue."
+        )
+
+        setStatus(
+            "License required.",
+            nil
+        )
+
+        task.wait(0.25)
+
+        pcall(function()
+            input:CaptureFocus()
+        end)
+
+        return
+    end
+
+    --------------------------------------------------------
+    -- Version error
+    --------------------------------------------------------
+
+    if tokenError == "CLIENT_UPDATE_REQUIRED" then
+
+        setSubtitle(
+            "The Worker rejected this client version.\n" ..
+            "Loader version: " ..
+            SCRIPT_VERSION
+        )
+
+        setStatus(
+            explainAuthError(tokenError),
+            "error"
+        )
+
+        return
+    end
+
+    --------------------------------------------------------
+    -- Other authorization error
+    --------------------------------------------------------
+
+    setSubtitle(
+        "Authorization request failed."
+    )
+
+    setStatus(
+        explainAuthError(tokenError),
+        "error"
+    )
+end)
