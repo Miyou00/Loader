@@ -1,0 +1,188 @@
+-- Client Inspector / Delta crypto capability diagnostic
+-- Run this alone in Delta. It DOES NOT contact your Worker and DOES NOT
+-- create or consume a license.
+--
+-- Purpose:
+--   1. Identify Delta's crypt.signcreate/signkeygen output shape.
+--   2. Identify crypt.sign input/output behavior.
+--   3. Confirm gethwid and persistent file APIs.
+--
+-- Send the console output back to me. Do not paste any license key or secret.
+
+local function t(v)
+    local ok, s = pcall(function()
+        return typeof(v)
+    end)
+    return ok and s or type(v)
+end
+
+local function describe(value, depth, seen)
+    depth = depth or 0
+    seen = seen or {}
+    if depth > 3 then
+        return "<depth-limit>"
+    end
+
+    local valueType = type(value)
+    if value == nil then return "nil" end
+    if valueType ~= "table" then
+        return tostring(value)
+    end
+
+    if seen[value] then return "<cycle>" end
+    seen[value] = true
+
+    local out = {}
+    for k, v in pairs(value) do
+        local key = tostring(k)
+        local vt = type(v)
+        if vt == "table" then
+            out[#out + 1] = key .. " = " .. describe(v, depth + 1, seen)
+        else
+            local text = tostring(v)
+            if #text > 120 then text = text:sub(1, 120) .. "..." end
+            out[#out + 1] = key .. " = [" .. vt .. "] " .. text
+        end
+    end
+    table.sort(out)
+    return "{ " .. table.concat(out, ", ") .. " }"
+end
+
+print("========== CLIENT INSPECTOR CRYPTO DIAGNOSTIC ==========")
+
+local cryptTable = rawget(_G, "crypt")
+print("crypt:", t(cryptTable))
+
+if type(cryptTable) == "table" then
+    for _, name in ipairs({
+        "signcreate",
+        "sign_create",
+        "signkeygen",
+        "sign_keygen",
+        "sign",
+        "signopen",
+        "sign_open",
+        "generatebytes",
+        "random",
+        "hash",
+        "base64encode",
+        "base64decode",
+        "hexencode",
+        "hexdecode",
+    }) do
+        print("crypt." .. name .. ":", type(cryptTable[name]))
+    end
+
+    local keygen =
+        cryptTable.signcreate
+        or cryptTable.sign_create
+        or cryptTable.signkeygen
+        or cryptTable.sign_keygen
+
+    if type(keygen) == "function" then
+        print("")
+        print("---- SIGNING KEY GENERATION ----")
+
+        local ok, a, b, c = pcall(keygen)
+        print("call ok:", ok)
+
+        if ok then
+            print("return #1 type:", t(a))
+            print("return #1:", describe(a))
+            print("return #2 type:", t(b))
+            print("return #2:", describe(b))
+            print("return #3 type:", t(c))
+            print("return #3:", describe(c))
+
+            local publicKey = nil
+            local privateKey = nil
+
+            if type(a) == "table" then
+                publicKey =
+                    a.public
+                    or a.publicKey
+                    or a.public_key
+                    or a.pub
+                    or a[1]
+
+                privateKey =
+                    a.private
+                    or a.privateKey
+                    or a.private_key
+                    or a.secret
+                    or a.secretKey
+                    or a[2]
+            else
+                publicKey = a
+                privateKey = b
+            end
+
+            print("candidate public key type:", t(publicKey))
+            print("candidate public key:", describe(publicKey))
+            print("candidate private key type:", t(privateKey))
+            print("candidate private key:", describe(privateKey))
+
+            local signFunction = cryptTable.sign
+
+            if type(signFunction) == "function" and privateKey ~= nil then
+                print("")
+                print("---- SIGN TEST ----")
+
+                local signOk, signature = pcall(function()
+                    return signFunction("CLIENT_INSPECTOR_CHALLENGE", privateKey)
+                end)
+
+                print("sign(message, privateKey) ok:", signOk)
+                print("signature type:", t(signature))
+                print("signature:", describe(signature))
+
+                if not signOk then
+                    local signOk2, signature2 = pcall(function()
+                        return signFunction(privateKey, "CLIENT_INSPECTOR_CHALLENGE")
+                    end)
+
+                    print("sign(privateKey, message) ok:", signOk2)
+                    print("signature type:", t(signature2))
+                    print("signature:", describe(signature2))
+                end
+            end
+        else
+            print("keygen error:", tostring(a))
+        end
+    else
+        print("No signing key-generation function was exposed.")
+    end
+end
+
+print("")
+print("---- HWID / FILE APIs ----")
+
+local hwidFn =
+    rawget(_G, "gethwid")
+    or rawget(_G, "get_hwid")
+    or rawget(_G, "get_user_identifier")
+
+print("gethwid function:", type(hwidFn))
+
+if type(hwidFn) == "function" then
+    local ok, value = pcall(hwidFn)
+    print("gethwid call ok:", ok)
+    print("HWID type:", t(value))
+    if ok then
+        print("HWID length:", #tostring(value))
+        print("HWID fingerprint prefix:", tostring(value):sub(1, 6) .. "...")
+    end
+end
+
+for _, name in ipairs({
+    "isfile",
+    "readfile",
+    "writefile",
+    "delfile",
+    "makefolder",
+}) do
+    print(name .. ":", type(rawget(_G, name)))
+end
+
+print("========================================================")
+print("END DIAGNOSTIC")
