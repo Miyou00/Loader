@@ -137,6 +137,40 @@ local function postWorker(path, payload, extraHeaders)
     return data
 end
 
+local function explainAuthError(err)
+    local value = tostring(err or "")
+
+    if value == "CLIENT_UPDATE_REQUIRED" then
+        return "This loader is outdated. Update the public loader before continuing."
+    elseif value == "LICENSE_REQUIRED" then
+        return "A new PWF license key is required."
+    elseif value == "DEVICE_NOT_ENROLLED" then
+        return "This Roblox account/device is not enrolled. Enter a new PWF license key."
+    elseif value == "DEVICE_ENTITLEMENT_EXPIRED" then
+        return "The 24-hour activation has expired. Enter a new PWF license key."
+    elseif value == "HWID_MISMATCH" then
+        return "This PWF license is already bound to a different device identity."
+    elseif value == "DEVICE_LIMIT" then
+        return "The PWF device limit has been reached."
+    elseif value == "INVALID_LICENSE" then
+        return "The PWF license key is invalid."
+    elseif value == "LICENSE_EXPIRED" then
+        return "The PWF license has expired."
+    elseif value == "LICENSE_BANNED" then
+        return "The PWF license is banned."
+    elseif value == "LICENSE_PAUSED" then
+        return "The PWF license is paused."
+    elseif value == "USER_MISMATCH" then
+        return "This activation is bound to a different Roblox account."
+    elseif value == "JOB_MISMATCH" then
+        return "The authorization belongs to a different Roblox server session. Please retry."
+    elseif string.find(value, "HTTP 426", 1, true) then
+        return "The Worker rejected this loader because it requires a newer client version."
+    end
+
+    return value ~= "" and value or "Authorization failed."
+end
+
 local function getSource(token)
     if type(token) ~= "string" or token == "" then
         return nil, "Missing source token."
@@ -451,22 +485,7 @@ local function activateWithLicense()
     end
 
     if type(data.token) ~= "string" or data.token == "" then
-        local message = data.error or "License activation failed."
-
-        if message == "INVALID_LICENSE" then
-            message = "Invalid license key."
-        elseif message == "HWID_MISMATCH" then
-            message = "This license is bound to another device identity."
-        elseif message == "DEVICE_LIMIT" then
-            message = "PWF device limit reached."
-        elseif message == "LICENSE_EXPIRED" then
-            message = "This license has expired."
-        elseif message == "LICENSE_BANNED" then
-            message = "This license is banned."
-        elseif message == "LICENSE_PAUSED" then
-            message = "This license is paused."
-        end
-
+        local message = explainAuthError(data.error or "License activation failed.")
         setStatus(message, "error")
         busy = false
         activate.AutoButtonColor = true
@@ -544,6 +563,14 @@ task.spawn(function()
         return
     end
 
+    if err == "CLIENT_UPDATE_REQUIRED" then
+        subtitle.Text =
+            "This loader version is not accepted by the Worker.\n" ..
+            "Update the public loader and try again."
+        setStatus(explainAuthError(err), "error")
+        return
+    end
+
     subtitle.Text = "Authorization check failed."
-    setStatus(tostring(err or "Unknown authorization error."), "error")
+    setStatus(explainAuthError(err), "error")
 end)
