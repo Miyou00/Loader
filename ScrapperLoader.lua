@@ -596,7 +596,7 @@ local function executeSource(source)
             "loadstring is unavailable in this executor."
     end
 
-    local compileOk, chunkOrError = pcall(function()
+    local compileOk, chunkOrError, compileError = pcall(function()
         return loadstring(source)
     end)
 
@@ -606,9 +606,13 @@ local function executeSource(source)
             tostring(chunkOrError)
     end
 
+    -- loadstring returns (nil, errorMessage) for syntax errors in standard
+    -- Lua/Luau environments. Preserve that diagnostic instead of masking it
+    -- as "did not return a function".
     if type(chunkOrError) ~= "function" then
         return false,
-            "Inspector compilation did not return a function."
+            "Inspector compilation failed:\n" ..
+            tostring(compileError or chunkOrError or "Unknown compiler error")
     end
 
     local executeOk, executeError =
